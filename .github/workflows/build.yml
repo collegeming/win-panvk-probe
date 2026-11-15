@@ -43,12 +43,12 @@ jobs:
             /DUMDF_USING_NTSTATUS /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
             /Isrc\compat /Isrc\third_party\vdrm ^
             src\probe_main.c src\third_party\vdrm\vdrm.c src\third_party\vdrm\vdrm_wddm.c ^
-            /Fe:vdrm-probe.exe /link /SUBSYSTEM:CONSOLE
+            /Fe:vdrm-probe.exe /link /MACHINE:ARM64 /SUBSYSTEM:CONSOLE
           if errorlevel 1 exit /b 1
           echo === artifacts ===
           dir vdrm-probe.*
-          dumpbin /headers vdrm-probe.exe | findstr /i "machine"
-          dumpbin /dependents vdrm-probe.exe
+          link /nologo /dump /headers vdrm-probe.exe | findstr /i "machine"
+          link /nologo /dump /dependents vdrm-probe.exe
 
       - name: Hash + upload
         shell: pwsh
