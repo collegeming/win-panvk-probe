@@ -119,7 +119,7 @@ vdrm_alloc_rsp(struct vdrm_device *vdev, struct vdrm_ccmd_req *req, uint32_t sz)
 
    simple_mtx_lock(&vdev->rsp_lock);
 
-   sz = align(sz, 8);
+   sz = vdrm_align(sz, 8);
 
    if ((vdev->next_rsp_off + sz) >= vdev->rsp_mem_len)
       vdev->next_rsp_off = 0;

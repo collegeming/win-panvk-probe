@@ -203,7 +203,7 @@ kbv_rpc(struct vdrm_device *vdev, struct kbv_req *req, struct kbv_rsp *rsp,
 {
    struct vdrm_ccmd_req *hdr = (struct vdrm_ccmd_req *)req;
    struct vdrm_execbuf_params params = {0};
-   uint32_t rsp_size = (uint32_t)align(sizeof(*rsp), 8);
+   uint32_t rsp_size = (uint32_t)vdrm_align(sizeof(*rsp), 8);
    uint64_t start, elapsed_ms;
    int ret;
 
