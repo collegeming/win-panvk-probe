@@ -29,8 +29,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "vdrm.h"
 #include "vdrm_probe.h"
+#include "vdrm.h"
 
 #include "util/os_time.h"
 #include "util/u_math.h"
@@ -172,11 +172,12 @@ print_caps(const struct vdrm_wddm_probe_state *st)
    return true;
 }
 
-static void
+static bool
 print_shmem(const struct vdrm_wddm_probe_state *st, struct vdrm_device *vdev)
 {
    uint32_t offset = (uint32_t)((const uint8_t *)vdev->rsp_mem -
                                 (const uint8_t *)vdev->shmem);
+   bool ok = true;
 
    printf("[stage 3] shared ring (HOST3D|MAPPABLE blob_id=0 size=0x%x)\n",
           PROBE_SHMEM_SIZE);
@@ -185,12 +186,26 @@ print_shmem(const struct vdrm_wddm_probe_state *st, struct vdrm_device *vdev)
    printf("  virtio resource id      = %u\n", st->shmem_res_id);
    printf("  BlobMap status          = 0x%08lx\n", (ULONG)st->shmem_map_status);
    printf("  CPU mapping             = %p\n", (void *)vdev->shmem);
-   printf("  shmem->seqno            = %u\n", vdev->shmem->seqno);
+   printf("  shmem->seqno            = %u (fresh blob must be 0)\n",
+          vdev->shmem->seqno);
    printf("  shmem->rsp_mem_offset   = %u (expected 8)\n",
           vdev->shmem->rsp_mem_offset);
    printf("  rsp_mem                 = %p\n", (void *)vdev->rsp_mem);
    printf("  rsp_mem_len             = %u\n", vdev->rsp_mem_len);
    printf("  offset recomputed from pointers = %u\n", offset);
+
+   /* Stale-page criterion: a fresh host shmem blob is zero-filled and the
+    * host writes rsp_mem_offset=8 at creation.  A non-zero initial seqno or a
+    * different offset means the mapping/offset was reused without the host
+    * re-initializing it, which is exactly the failure this milestone hunts. */
+   if (vdev->shmem->rsp_mem_offset != 8 || vdev->shmem->seqno != 0) {
+      printf("  STALE-PAGE CRITERION FAILED (rsp_mem_offset=%u seqno=%u)\n",
+             vdev->shmem->rsp_mem_offset, vdev->shmem->seqno);
+      ok = false;
+   } else {
+      printf("  STALE-PAGE CRITERION OK (rsp_mem_offset=8, seqno=0)\n");
+   }
+   return ok;
 }
 
 /*
@@ -230,9 +245,17 @@ kbv_rpc(struct vdrm_device *vdev, struct kbv_req *req, struct kbv_rsp *rsp,
    for (;;) {
       uint32_t host_seqno = vdev->shmem->seqno;
 
-      if (!seqno_before(host_seqno, hdr->seqno)) {
+      if (host_seqno == hdr->seqno) {
          printf("  host seqno=%u reached target=%u\n", host_seqno, hdr->seqno);
          break;
+      }
+      /* Equality, not ordering: a stale shmem page can hold a seqno ahead of
+       * this fresh connection's counter.  Accepting "host >= target" would
+       * then read an old response and falsely pass the stale-page test. */
+      if (!seqno_before(host_seqno, hdr->seqno)) {
+         printf("  UNEXPECTED seqno: host=%u target=%u (stale shmem page?)\n",
+                host_seqno, hdr->seqno);
+         return -EPROTO;
       }
       elapsed_ms = (os_time_get_nano() - start) / 1000000ull;
       if (elapsed_ms >= timeout_ms) {
@@ -396,8 +419,8 @@ probe_csif(struct vdrm_device *vdev, uint32_t timeout_ms, bool *criterion_ok)
 }
 
 static int
-run_round(int round, uint32_t timeout_ms, bool *caps_ok, bool *props_ok,
-          bool *csif_ok)
+run_round(int round, uint32_t timeout_ms, bool *caps_ok, bool *shmem_ok,
+          bool *props_ok, bool *csif_ok)
 {
    const struct vdrm_wddm_probe_state *st;
    struct vdrm_device *vdev;
@@ -417,7 +440,7 @@ run_round(int round, uint32_t timeout_ms, bool *caps_ok, bool *props_ok,
           st->h_adapter, st->h_device, st->h_context);
 
    *caps_ok = print_caps(st);
-   print_shmem(st, vdev);
+   *shmem_ok = print_shmem(st, vdev);
 
    if (probe_props(vdev, timeout_ms, props_ok))
       ret = -1;
@@ -443,8 +466,11 @@ main(int argc, char **argv)
 {
    int rounds = 2;
    uint32_t timeout_ms = timeout_ms_from_env();
-   bool all_caps = true, all_props = true, all_csif = true, all_rounds = true;
+   bool all_caps = true, all_shmem = true, all_props = true, all_csif = true;
+   bool all_rounds = true;
    int i, round;
+
+   setvbuf(stdout, NULL, _IONBF, 0);
 
    for (i = 1; i < argc; i++) {
       if (!strcmp(argv[i], "--rounds") && i + 1 < argc) {
@@ -480,11 +506,12 @@ main(int argc, char **argv)
           PROBE_SHMEM_SIZE);
 
    for (round = 1; round <= rounds; round++) {
-      bool caps = false, props = false, csif = false;
+      bool caps = false, shmem = false, props = false, csif = false;
 
-      if (run_round(round, timeout_ms, &caps, &props, &csif))
+      if (run_round(round, timeout_ms, &caps, &shmem, &props, &csif))
          all_rounds = false;
       all_caps &= caps;
+      all_shmem &= shmem;
       all_props &= props;
       all_csif &= csif;
    }
@@ -492,6 +519,8 @@ main(int argc, char **argv)
    printf("\n=== summary ===\n");
    printf("  capset fields (wire_format_version=2, context_type=0x4b424153): %s\n",
           all_caps ? "PASS" : "FAIL");
+   printf("  shmem fresh (rsp_mem_offset=8, initial seqno=0): %s\n",
+          all_shmem ? "PASS" : "FAIL");
    printf("  kbv props (cmd=9, status=0, size > 0, expected %u): %s\n",
           PROPS_EXPECTED_SIZE, all_props ? "PASS" : "FAIL");
    printf("  kbv CSIF  (cmd=10, status=0, %u bytes): %s\n",
@@ -499,7 +528,8 @@ main(int argc, char **argv)
    printf("  all %d connect/teardown rounds: %s\n", rounds,
           all_rounds ? "PASS" : "FAIL");
    printf("RESULT: %s\n",
-          (all_caps && all_props && all_csif && all_rounds) ? "PASS" : "FAIL");
+          (all_caps && all_shmem && all_props && all_csif && all_rounds) ?
+          "PASS" : "FAIL");
 
-   return (all_caps && all_props && all_csif && all_rounds) ? 0 : 1;
+   return (all_caps && all_shmem && all_props && all_csif && all_rounds) ? 0 : 1;
 }

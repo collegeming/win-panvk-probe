@@ -100,7 +100,9 @@ vdrm-probe.exe --rounds 2 --timeout-ms 10000
   context_type           = 0x4b424153 ("KBAS") (expected 0x4b424153 "KBAS")
   CAPSET CRITERION OK
 [stage 3] shared ring ...
+  shmem->seqno            = 0 (fresh blob must be 0)
   shmem->rsp_mem_offset   = 8 (expected 8)
+  STALE-PAGE CRITERION OK (rsp_mem_offset=8, seqno=0)
 [stage 4] kbv RPC cmd=9 (GPU props: size query)
   rx: len=1048 status=0 handle=0 size=0 value=781
   props total size = 781 (expected 781)
@@ -112,7 +114,9 @@ RESULT: PASS
 ```
 
 `props` 总长度以 781 为期望值；按 M1 判据，非 0 且 `status=0` 也接受，探针会
-打印实际值。CSIF 必须为 24B。
+打印实际值。CSIF 必须为 24B。shmem 必须是新建页：`rsp_mem_offset=8` 且初始
+`seqno=0`；若第二轮仍看到旧的 seqno 或偏移，说明 host/KMD 复用了未重新初始化
+的页，探针判 FAIL（seqno 等待使用严格相等，避免旧值“超前”造成假通过）。
 
 ## 失败判读
 
@@ -140,6 +144,8 @@ RESULT: PASS
   arena）。若 host 开了 `--pre-alloc` arena，KMD 可能返回
   `IO_DEVICE_ERROR`，不在本探针范围内。
 - 两轮 connect 已覆盖同进程的偏移复用；跨进程复测建议再连续运行两次 exe。
+- 探针 exe 未签名；若客机启用了 HVCI/WDAC 或 Smart App Control，需按现有测试
+  流程允许该二进制运行，不要为此关闭系统安全策略。
 - 探针不修改系统、不安装驱动、不启动 VM。
 
 ## 源码来源与许可证
