@@ -1,0 +1,29 @@
+name: env-probe
+on:
+  workflow_dispatch:
+jobs:
+  env:
+    runs-on: windows-latest
+    steps:
+      - name: Inventory SDK/WDK/ARM64 tools
+        shell: pwsh
+        run: |
+          "== Windows Kits roots =="
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10' -ErrorAction SilentlyContinue | Select-Object FullName
+          "== Include versions =="
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -ErrorAction SilentlyContinue | Select-Object Name
+          "== d3dkmthk/d3dkmdt locations =="
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Recurse -Filter 'd3dkmthk.h' -ErrorAction SilentlyContinue | Select-Object FullName
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Recurse -Filter 'd3dukmdt.h' -ErrorAction SilentlyContinue | Select-Object FullName
+          "== WDK folders =="
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10' -Directory -ErrorAction SilentlyContinue | Select-Object Name
+          "== VS install =="
+          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Directory -ErrorAction SilentlyContinue | Select-Object Name
+          "== ARM64 MSVC tools =="
+          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse -Filter 'cl.exe' -ErrorAction SilentlyContinue | Where-Object FullName -match 'ARM64|Hostx64\\arm64' | Select-Object FullName
+          "== ARM64 libs =="
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Lib' -Recurse -Filter 'gdi32.lib' -ErrorAction SilentlyContinue | Select-Object FullName
+          "== nuget =="
+          (Get-Command nuget -ErrorAction SilentlyContinue).Source
+          "== vswhere ARM64 component =="
+          & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
