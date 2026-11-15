@@ -39,6 +39,7 @@ jobs:
           "C:\Program Files\LLVM\bin\clang-cl.exe" --version
           echo === clang-cl build ===
           "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /std:c11 /O2 /Zi /W3 /MT ^
+            --target=aarch64-pc-windows-msvc ^
             /DUMDF_USING_NTSTATUS /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
             /Isrc\compat /Isrc\third_party\vdrm ^
             src\probe_main.c src\third_party\vdrm\vdrm.c src\third_party\vdrm\vdrm_wddm.c ^
