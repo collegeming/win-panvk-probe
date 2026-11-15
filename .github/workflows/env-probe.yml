@@ -5,25 +5,50 @@ jobs:
   env:
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Inventory SDK/WDK/ARM64 tools
         shell: pwsh
         run: |
-          "== Windows Kits roots =="
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10' -ErrorAction SilentlyContinue | Select-Object FullName
-          "== Include versions =="
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -ErrorAction SilentlyContinue | Select-Object Name
-          "== d3dkmthk/d3dkmdt locations =="
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Recurse -Filter 'd3dkmthk.h' -ErrorAction SilentlyContinue | Select-Object FullName
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Recurse -Filter 'd3dukmdt.h' -ErrorAction SilentlyContinue | Select-Object FullName
-          "== WDK folders =="
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10' -Directory -ErrorAction SilentlyContinue | Select-Object Name
-          "== VS install =="
-          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Directory -ErrorAction SilentlyContinue | Select-Object Name
-          "== ARM64 MSVC tools =="
-          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse -Filter 'cl.exe' -ErrorAction SilentlyContinue | Where-Object FullName -match 'ARM64|Hostx64\\arm64' | Select-Object FullName
-          "== ARM64 libs =="
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Lib' -Recurse -Filter 'gdi32.lib' -ErrorAction SilentlyContinue | Select-Object FullName
-          "== nuget =="
-          (Get-Command nuget -ErrorAction SilentlyContinue).Source
-          "== vswhere ARM64 component =="
-          & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          "== VS installs =="
+          & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -all -products * -property installationPath
+          "== LLVM =="
+          Get-ChildItem 'C:\Program Files\LLVM\bin\clang-cl.exe','C:\Program Files\LLVM\bin\clang.exe' -ErrorAction SilentlyContinue | Select-Object FullName
+          if (Test-Path 'C:\Program Files\LLVM\bin\clang-cl.exe') {
+            & 'C:\Program Files\LLVM\bin\clang-cl.exe' --version
+          }
+          "== cmake =="
+          cmake --version
+          "== ct toolset =="
+          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse -Filter 'cl.exe' -ErrorAction SilentlyContinue | Select-Object -First 20 FullName
+          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio' -Recurse -Filter 'vcvarsall.bat' -ErrorAction SilentlyContinue | Select-Object FullName
+      - name: Smoke compile D3DKMT header + packed structs with clang-cl ARM64
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci | Out-Null
+          @'
+          #define UMDF_USING_NTSTATUS
+          #include <windows.h>
+          #include <winternl.h>
+          #include <ntstatus.h>
+          #include <d3dkmthk.h>
+          #include <stdint.h>
+          typedef struct __attribute__((packed)) { uint64_t tag; uint32_t id; } packed_t;
+          _Static_assert(sizeof(packed_t) == 12, "packed");
+          int main(void) {
+            D3DKMT_ENUMADAPTERS2 e = {0};
+            D3DKMT_CREATEALLOCATION ca = {0};
+            ca.Flags.CreateResource = 1;
+            D3DDDI_ALLOCATIONINFO2 ai = {0};
+            D3DKMT_CREATECONTEXT cc = {0};
+            cc.NodeOrdinal = 0;
+            D3DKMT_ESCAPE es = {0};
+            es.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
+            PFND3DKMT_ESCAPE fn = 0;
+            (void)e; (void)ca; (void)ai; (void)cc; (void)es; (void)fn;
+            return sizeof(D3DDDI_ALLOCATIONINFO2) > 0 ? 0 : 1;
+          }
+          '@ | Set-Content -Encoding ascii ci/smoke.c
+          $clang = 'C:\Program Files\LLVM\bin\clang-cl.exe'
+          & $clang /nologo /c /std:c11 /arm64 /I "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared" /I "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um" /I "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt" ci\smoke.c /Fo:ci\smoke.obj
+          if ($LASTEXITCODE -ne 0) { throw "compile failed: $LASTEXITCODE" }
+          Get-ChildItem ci\smoke.obj | Select-Object Length
