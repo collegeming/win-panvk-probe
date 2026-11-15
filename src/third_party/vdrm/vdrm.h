@@ -1,0 +1,249 @@
+/*
+ * Copyright © 2023 Google, Inc.
+ * SPDX-License-Identifier: MIT
+ */
+
+/* A simple helper layer for virtgpu drm native context, which also
+ * abstracted the differences between vtest (communicating via socket
+ * with vtest server) vs virtgpu (communicating via drm/virtio driver
+ * in the guest).
+ */
+
+#ifndef __VDRM_H__
+#define __VDRM_H__
+
+#include <stdint.h>
+
+#include "util/simple_mtx.h"
+
+#include "virtio/virtio-gpu/drm_hw.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct vdrm_device;
+struct vdrm_execbuf_params;
+
+struct vdrm_device_funcs {
+   /* Note flush_locked and execbuf_locked are similar, and on top of virtgpu
+    * guest kernel driver are basically the same.  But with vtest, only cmds
+    * that result in host kernel cmd submission can take and/or return fence
+    * and/or syncobj fd's.
+    */
+   int (*execbuf_locked)(struct vdrm_device *vdev, struct vdrm_execbuf_params *p,
+                         void *command, unsigned size);
+   int (*flush_locked)(struct vdrm_device *vdev, uintptr_t *fencep);
+
+   void (*wait_fence)(struct vdrm_device *vdev, uintptr_t fence);
+
+   uint32_t (*dmabuf_to_handle)(struct vdrm_device *vdev, int fd);
+   uint32_t (*handle_to_res_id)(struct vdrm_device *vdev, uint32_t handle);
+
+   /* Adopt a BO the platform already allocated elsewhere, identified by an
+    * opaque platform handle (WDDM: D3DDDI_ALLOCATIONINFO2.hAllocation, which
+    * another process may have opened via OpenResource2).  Returns a vdrm BO
+    * handle that does NOT own the underlying allocation: bo_close releases the
+    * vdrm-side reference only, and the platform owner remains responsible for
+    * destroying it.  Optional; NULL on backends without a notion of externally
+    * owned allocations (see vdrm_alloc_to_handle). */
+   uint32_t (*alloc_to_handle)(struct vdrm_device *vdev, uint32_t platform_handle,
+                               uint64_t *size);
+
+   uint32_t (*bo_create)(struct vdrm_device *vdev, size_t size, uint32_t blob_flags,
+                         uint64_t blob_id, uint32_t blob_hints,
+                         struct vdrm_ccmd_req *req);
+   int (*bo_wait)(struct vdrm_device *vdev, uint32_t handle);
+   void *(*bo_map)(struct vdrm_device *vdev, uint32_t handle, size_t size, void *placed_addr);
+   int (*bo_export_dmabuf)(struct vdrm_device *vdev, uint32_t handle);
+   void (*bo_close)(struct vdrm_device *vdev, uint32_t handle);
+
+   void (*close)(struct vdrm_device *vdev);
+};
+
+struct vdrm_device {
+   const struct vdrm_device_funcs *funcs;
+
+   bool supports_cross_device;
+
+   /* DroidVM guest-alloc: BO pages come from the guest's own virtio-gpu pool instead of the
+    * host allocating them. Probed from VIRTGPU_PARAM_CREATE_GUEST_HANDLE, so it is false on a
+    * kernel or VMM that does not offer it and every caller keeps the host-allocating path.
+    * Drivers that build their own GEM_NEW request need this to decide whether to mark the BO
+    * guest-allocated; only they know which of their allocations may take that path. */
+   bool supports_guest_alloc;
+
+#ifdef _WIN32
+   /* In-flight parameters for vdrm_bo_create_shared, valid only between that
+    * function taking eb_lock and the backend's bo_create consuming them.  A
+    * pending field rather than a wider bo_create signature keeps the other
+    * backends untouched; eb_lock is what makes it safe (vdrm_bo_create already
+    * serializes every bo_create there). The backend clears them. */
+   void *pending_shared_rt_resource;
+   uint32_t pending_shared_km_resource;   /* out */
+#endif
+
+   struct vdrm_shmem *shmem;
+   uint8_t *rsp_mem;
+   uint32_t rsp_mem_len;
+   uint32_t next_rsp_off;
+   simple_mtx_t rsp_lock;
+   simple_mtx_t eb_lock;
+
+   uint32_t next_seqno;
+
+   /*
+    * Buffering for requests to host:
+    */
+   uint32_t reqbuf_len;
+   uint32_t reqbuf_cnt;
+   uint8_t reqbuf[0x4000];
+
+   /*
+    * struct virgl_renderer_capset_drm has a varying size and must be placed
+    * in the end of struct vdrm_device.
+    */
+   struct virgl_renderer_capset_drm caps;
+};
+
+struct vdrm_device *vdrm_device_connect(int fd, uint32_t context_type);
+void vdrm_device_close(struct vdrm_device *vdev);
+
+/* DroidVM guest-alloc pool accounting; see vdrm_virtgpu.c. Byte counts. Any output may be NULL.
+ * False (outputs untouched) means this device has no guest pool. Takes an fd because probe needs
+ * it before connecting. */
+bool vdrm_guest_pool_stats(int fd, uint64_t *total, uint64_t *used, uint64_t *largest_free);
+
+void * vdrm_alloc_rsp(struct vdrm_device *vdev, struct vdrm_ccmd_req *req, uint32_t sz);
+int vdrm_send_req(struct vdrm_device *vdev, struct vdrm_ccmd_req *req, bool sync);
+int vdrm_flush(struct vdrm_device *vdev);
+
+struct vdrm_execbuf_params {
+   int ring_idx;
+
+   struct vdrm_ccmd_req *req;     /* Note, must be host kernel cmd submit */
+
+   uint32_t *handles;
+   uint32_t num_handles;
+
+   struct drm_virtgpu_execbuffer_syncobj *in_syncobjs;
+   struct drm_virtgpu_execbuffer_syncobj *out_syncobjs;
+
+   bool has_in_fence_fd : 1;
+   bool needs_out_fence_fd : 1;
+
+   int fence_fd;                  /* in/out fence */
+
+   uint32_t num_in_syncobjs;
+   uint32_t num_out_syncobjs;
+};
+
+/**
+ * Note, must be a host cmd submission, which specified in/out fence/syncobj
+ * can be passed to.  In the vtest case, we can't get fences/syncobjs for
+ * other host cmds.
+ */
+int vdrm_execbuf(struct vdrm_device *vdev, struct vdrm_execbuf_params *p);
+
+void vdrm_host_sync(struct vdrm_device *vdev, const struct vdrm_ccmd_req *req);
+
+/**
+ * Import dmabuf fd returning a GEM handle
+ */
+static inline uint32_t
+vdrm_dmabuf_to_handle(struct vdrm_device *vdev, int fd)
+{
+   return vdev->funcs->dmabuf_to_handle(vdev, fd);
+}
+
+static inline uint32_t
+vdrm_handle_to_res_id(struct vdrm_device *vdev, uint32_t handle)
+{
+   return vdev->funcs->handle_to_res_id(vdev, handle);
+}
+
+/**
+ * Adopt an externally owned platform allocation, returning a vdrm BO handle.
+ * On success *size receives the allocation's size as the platform reports it,
+ * which the caller must use instead of its own estimate (the owner may have
+ * rounded up).  Returns 0 if unsupported by this backend or on failure.
+ */
+static inline uint32_t
+vdrm_alloc_to_handle(struct vdrm_device *vdev, uint32_t platform_handle,
+                     uint64_t *size)
+{
+   if (!vdev->funcs->alloc_to_handle)
+      return 0;
+   return vdev->funcs->alloc_to_handle(vdev, platform_handle, size);
+}
+
+uint32_t vdrm_bo_create(struct vdrm_device *vdev, size_t size,
+                        uint32_t blob_flags, uint64_t blob_id,
+                        uint32_t blob_hints,
+                        struct vdrm_ccmd_req *req);
+
+#ifdef _WIN32
+/**
+ * Install the D3D UMD's allocation hooks (VIRTIO_WDDM_RuntimeAllocator).  Both
+ * pointers are untyped here so vdrm.h stays free of the WDDM UMD headers;
+ * vdrm_wddm.c casts them back.  Passing NULL for either removes the allocator,
+ * which makes subsequent shared allocations fail rather than silently fall back
+ * to a private allocation that no other process can open.
+ */
+void vdrm_wddm_set_runtime_allocator(struct vdrm_device *vdev, void *ctx,
+                                     void *alloc_fn, void *free_fn);
+
+/**
+ * Create a BO whose backing must be usable as a D3D11 shared resource.
+ *
+ * Identical to vdrm_bo_create except the platform allocation is obtained from
+ * the runtime allocator the D3D UMD installed, passing hRTResource so the
+ * runtime can associate the allocation with that resource.  On success
+ * *out_km_resource receives the kernel resource handle the application needs
+ * for IDXGIResource::GetSharedHandle; it is 0 if the runtime did not provide
+ * one.  Returns 0 if no allocator is installed or the allocation failed.
+ */
+uint32_t vdrm_bo_create_shared(struct vdrm_device *vdev, size_t size,
+                               uint32_t blob_flags, uint64_t blob_id,
+                               uint32_t blob_hints,
+                               struct vdrm_ccmd_req *req,
+                               void *hRTResource,
+                               uint32_t *out_km_resource);
+#endif
+
+static inline int
+vdrm_bo_wait(struct vdrm_device *vdev, uint32_t handle)
+{
+   return vdev->funcs->bo_wait(vdev, handle);
+}
+
+static inline void *
+vdrm_bo_map(struct vdrm_device *vdev, uint32_t handle, size_t size, void *placed_addr)
+{
+   return vdev->funcs->bo_map(vdev, handle, size, placed_addr);
+}
+
+static inline int
+vdrm_bo_export_dmabuf(struct vdrm_device *vdev, uint32_t handle)
+{
+   return vdev->funcs->bo_export_dmabuf(vdev, handle);
+}
+
+static inline void
+vdrm_bo_close(struct vdrm_device *vdev, uint32_t handle)
+{
+   vdev->funcs->bo_close(vdev, handle);
+}
+
+/*
+ * Special interface for dealing with syncobjs when we don't have direct
+ * access to a rendernode:
+ */
+struct util_sync_provider;
+struct util_sync_provider *vdrm_vpipe_get_sync(struct vdrm_device *vdrm);
+
+#ifdef __cplusplus
+} /* end of extern "C" */
+#endif
+
+#endif /* __VDRM_H__ */

@@ -1,0 +1,65 @@
+name: build-arm64
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build.cmd'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Visual Studio ARM64 toolset
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          if (-not $vs) { throw "No Visual Studio installation with VC.Tools.ARM64" }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvarsall.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvarsall.bat not found: $vcvars" }
+          "VS_PATH=$vs" >> $env:GITHUB_ENV
+          "VCVARS=$vcvars" >> $env:GITHUB_ENV
+          "VS=$vs"
+          & $vswhere -latest -products * -property catalog_productDisplayVersion
+
+      - name: Build vdrm-probe.exe (ARM64, clang-cl)
+        shell: cmd
+        run: |
+          call "%VCVARS%" arm64
+          if errorlevel 1 exit /b 1
+          echo === compiler ===
+          "C:\Program Files\LLVM\bin\clang-cl.exe" --version
+          echo === clang-cl build ===
+          "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /std:c11 /O2 /Zi /W3 /MT ^
+            /DUMDF_USING_NTSTATUS /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+            /Isrc\compat /Isrc\third_party\vdrm ^
+            src\probe_main.c src\third_party\vdrm\vdrm.c src\third_party\vdrm\vdrm_wddm.c ^
+            /Fe:vdrm-probe.exe /link /SUBSYSTEM:CONSOLE
+          if errorlevel 1 exit /b 1
+          echo === artifacts ===
+          dir vdrm-probe.*
+          dumpbin /headers vdrm-probe.exe | findstr /i "machine"
+          dumpbin /dependents vdrm-probe.exe
+
+      - name: Hash + upload
+        shell: pwsh
+        run: |
+          $h = Get-FileHash .\vdrm-probe.exe -Algorithm SHA256
+          "$($h.Hash)  vdrm-probe.exe" | Tee-Object -FilePath SHA256SUMS.txt
+          $h | Format-List | Out-String | Write-Host
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item vdrm-probe.exe, vdrm-probe.pdb, SHA256SUMS.txt out -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vdrm-probe-arm64
+          path: out/*
+          if-no-files-found: error
