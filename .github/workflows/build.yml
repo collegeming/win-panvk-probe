@@ -47,12 +47,19 @@ jobs:
           if errorlevel 1 exit /b 1
           echo === artifacts ===
           dir vdrm-probe.*
-          link /nologo /dump /headers vdrm-probe.exe | findstr /i "machine"
-          link /nologo /dump /dependents vdrm-probe.exe
 
-      - name: Hash + upload
+      - name: Verify ARM64 PE header + hash
         shell: pwsh
         run: |
+          if (-not (Test-Path .\vdrm-probe.exe)) { throw "vdrm-probe.exe missing" }
+          $bytes = [IO.File]::ReadAllBytes((Resolve-Path .\vdrm-probe.exe))
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
+          "PE header offset = 0x{0:X}" -f $pe
+          "PE machine       = 0x{0:X4} (expected 0xAA64)" -f $machine
+          "PE subsystem     = 0x{0:X4} (3 = console)" -f $subsystem
+          if ($machine -ne 0xAA64) { throw "PE machine is not ARM64 (0xAA64)" }
           $h = Get-FileHash .\vdrm-probe.exe -Algorithm SHA256
           "$($h.Hash)  vdrm-probe.exe" | Tee-Object -FilePath SHA256SUMS.txt
           $h | Format-List | Out-String | Write-Host
